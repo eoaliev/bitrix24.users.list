@@ -23,7 +23,7 @@
 
 Статус и текст статуса будем получать через left join таблицы "Bitrix\Im\Model\StatusTable".
 
-Информацию о начальнике будем получать через "\CIntranetUtils::GetDepartmentManager", а количество подчиненных через  "\CIntranetUtils::getSubordinateEmployees"
+Информацию о начальнике будем получать через "\CIntranetUtils::GetStructure", а количество подчиненных через  "\CIntranetUtils::GetEmployeesCountForSorting"
 
 Ссылку на профиль пользователя будем формировать на основе шаблона переданного в компонент, по умолчанию будем брать из параметра "search_user_url" модуля интранет.
 
