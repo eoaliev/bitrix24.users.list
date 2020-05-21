@@ -1,18 +1,18 @@
 <?php
 
-use Bitrix\Im\StatusTable;
 use Bitrix\Intranet\UserTable;
 use Bitrix\Main\Config\Option;
 use Bitrix\Main\Grid\Options as GridOptions;
 use Bitrix\Main\Loader;
-use Bitrix\Main\ORM\Fields\Relations\Reference;
-use Bitrix\Main\ORM\Query\Join;
 use Bitrix\Main\ORM\Query\Query;
 use Bitrix\Main\UI\PageNavigation;
+use EoaLievBitrix24UsersList\Helper;
 
 if (!defined("B_PROLOG_INCLUDED") || B_PROLOG_INCLUDED !== true) {
     die();
 }
+
+require_once __DIR__.'/helper/autoload.php';
 
 class EoaLievBitrix24UsersList extends \CBitrixComponent
 {
@@ -193,21 +193,14 @@ class EoaLievBitrix24UsersList extends \CBitrixComponent
         $rows = $this->getGridRowsQuery($gridId, $navigation)
             ->exec();
 
+        $intranetHelper = new Helper\IntranetHelper();
+
         // Сначала переберем пользователей и найдем идентификаторы их менеджеров
         $items = [];
         $managersIds = [];
         while ($row = $rows->fetch()) {
-            $row['MANAGER_ID'] = 0;
-            if ('employee' === $row['USER_TYPE'] && is_array($row['UF_DEPARTMENT'])) {
-                $row['MANAGER_ID'] = $this->getUserManagerId(
-                    (int) $row['ID'],
-                    $row['UF_DEPARTMENT']
-                );
-            }
-
-            if (0 < $row['MANAGER_ID']) {
-                $managersIds[] = $row['MANAGER_ID'];
-            }
+            $row['MANAGER_ID'] = $intranetHelper->getManagerIdByUser($row) ?: 0;
+            $managersIds[] = $row['MANAGER_ID'];
 
             $items[] = [
                 'data' => $row,
@@ -216,23 +209,19 @@ class EoaLievBitrix24UsersList extends \CBitrixComponent
             ];
         }
 
-        // Если найдены идентификаторы менеджеров
-        // сформируем запрос на получение фамилии и имени
-        $managers = [];
-        if (0 < count($managersIds)) {
-            $managers = $this->fetchManagersByIds($managersIds);
-        }
+        $intranetHelper->setManagerIds($managersIds);
+        unset($managersIds);
 
         // Подготовим данные для вывода и добавим действие просмотр профиля
         foreach ($items as &$item) {
-            $item['columns'] = $this->prepareRowColumns($item['data'], $managers);
+            $item['columns'] = $this->prepareRowColumns($item['data'], $intranetHelper);
             $item['actions'][] = [
                 'text'    => 'Просмотреть профиль',
                 'default' => true,
                 'onclick' => "BX.SidePanel.Instance.open(\"{$item['columns']['DETAIL_PAGE_URL']}\")",
             ];
         }
-        unset($item);
+        unset($item, $intranetHelper);
 
         return $items;
     }
@@ -243,7 +232,6 @@ class EoaLievBitrix24UsersList extends \CBitrixComponent
         $query = $this->getGridRowsQueryBase();
 
         $this->navigationExtendsQuery($query, $navigation);
-        $this->statusExtendsQuery($query);
         $this->sortExtendsQuery($query, $gridId);
 
         return $query;
@@ -278,26 +266,6 @@ class EoaLievBitrix24UsersList extends \CBitrixComponent
             );
     }
 
-    // Расширяет объект запроса списка пользователей информацией о статусах
-    protected function statusExtendsQuery(Query $query)
-    {
-        if (!Loader::includeModule('im')) {
-            return;
-        }
-
-        $query
-            ->registerRuntimeField(
-                null,
-                (new Reference(
-                    'STATUS',
-                    StatusTable::class,
-                    Join::on('this.ID', 'ref.USER_ID')
-                ))->configureJoinType('left')
-            )
-            ->addSelect('STATUS.STATUS', 'STATUS_CODE')
-            ->addSelect('STATUS.STATUS_TEXT', 'STATUS_TEXT');
-    }
-
     // Расширяет объект запроса списка пользователей сортировкой
     protected function sortExtendsQuery(Query $query, string $gridId)
     {
@@ -325,7 +293,7 @@ class EoaLievBitrix24UsersList extends \CBitrixComponent
     }
 
     // Преобразовывет значения полей пользователя для отображения в гриде
-    protected function prepareRowColumns(array $row, array $managers = []): array
+    protected function prepareRowColumns(array $row, Helper\IntranetHelper $intranetHelper): array
     {
         $columns = $row;
 
@@ -333,24 +301,19 @@ class EoaLievBitrix24UsersList extends \CBitrixComponent
             (int) $row['ID']
         );
 
-        $columns['STATUS'] = $this->renderColumnStatus(
-            (string) $row['STATUS_CODE'],
-            (string) $row['STATUS_TEXT']
-        );
+        $columns['STATUS'] = $this->renderColumnStatus((int) $row['ID']);
 
         $columns['MANAGER'] = '';
         $columns['SUBORDINATES_COUNT'] = '';
 
         // Если это сотрудник выведем информацию о руководителе и количестве подчененных
         if ('employee' === $row['USER_TYPE']) {
-            if (0 < $row['MANAGER_ID'] && isset($managers[$row['MANAGER_ID']])) {
-                $columns['MANAGER'] = $this->renderColumnManager(
-                    $managers[$row['MANAGER_ID']]
-                );
-            }
+            $columns['MANAGER'] = $this->renderColumnManager(
+                $intranetHelper->getManagerByUser($row) ?: []
+            );
 
-            $columns['SUBORDINATES_COUNT'] = $this->renderColumnSubordinatesCount(
-                $row['ID']
+            $columns['SUBORDINATES_COUNT'] = $intranetHelper->getSubordinatesCount(
+                (int) $row['ID']
             );
         }
 
@@ -370,110 +333,23 @@ class EoaLievBitrix24UsersList extends \CBitrixComponent
     }
 
     // Возвращает текстовое представление статуса пользователя
-    protected function renderColumnStatus(string $code, string $text): string
+    protected function renderColumnStatus(int $userId): string
     {
-        $parts = [];
-
-        if (0 < strlen($code)) {
-            $parts[] = $code;
-        }
-
-        if (0 < strlen($text)) {
-            $parts[] = '('.$text.')';
-        }
-
-        return implode(' ', $parts);
+        return (new Helper\StatusHelper($userId))->getStatus() ?: '';
     }
 
     // Возвращает текствовое представление фамилии начальника пользователя
     protected function renderColumnManager(array $manager): string
     {
+        if (empty($manager)) {
+            return '';
+        }
+
         return sprintf(
             '<a href="%s" title="%s">%s</a>',
             $this->getUserDetailPageUrl($manager['ID']),
             $manager['LAST_NAME'] ?: $manager['NAME'],
             $manager['LAST_NAME'] ?: $manager['NAME']
         );
-    }
-
-    // Возвращает текствовое представление количества подчиненных пользователя
-    protected function renderColumnSubordinatesCount(int $id): string
-    {
-        // Получим все вышестояшие отделы
-        $departmentsIds = \CIntranetUtils::GetSubordinateDepartments($id, true);
-        if (0 >= count($departmentsIds)) {
-            return '';
-        }
-
-        // Получим количество для первого отдела
-        // Количество считается рекурсивно
-        // Визуально количество считается правильно,
-        // но если это не так можно получить структуру \CIntranetUtils::GetStructure()
-        // и посчитать ручками
-        $count = \CIntranetUtils::GetEmployeesCountForSorting(
-            $departmentsIds[0]
-        );
-
-        return 0 < $count ? (string) $count: '';
-    }
-
-    // Возвращает идентификатор руководителя пользователя
-    protected function getUserManagerId(int $userId, array $departmentsIds): int
-    {
-        // Переберем отделы в которые входит пользователь и посмотрим их руководителей
-        // Вернем первого найденного
-        foreach ($departmentsIds as $departmentId) {
-            $managerId = $this->getDepartmentManagerId($departmentId, $userId);
-            if (0 < $managerId) {
-                return $managerId;
-            }
-        }
-
-        return 0;
-    }
-
-    // Возвращает идентификатор руководителя отдела
-    protected function getDepartmentManagerId(int $departmentId, int $ignoreUserId): int
-    {
-        $structure = \CIntranetUtils::GetStructure();
-
-        // Попробуем сначала руководителя переданного отдела
-        $managerId = (int) $structure['DATA'][$departmentId]['UF_HEAD'];
-        if (0 < $managerId && $managerId !== $ignoreUserId) {
-            return $managerId;
-        }
-
-        // Посмотрим вышестоящие отделы
-        $parentDepartmentId = (int) $structure['DATA'][$departmentId]['IBLOCK_SECTION_ID'];
-        if (0 < $parentDepartmentId) {
-            return $this->getDepartmentManagerId($parentDepartmentId, $ignoreUserId);
-        }
-
-        return 0;
-    }
-
-    // Возвращает аттрибуты менеджеров
-    protected function fetchManagersByIds(array $ids): array
-    {
-        if (0 >= count($ids)) {
-            return [];
-        }
-
-        $rows = UserTable::query()
-            ->setSelect([
-                'ID',
-                'LAST_NAME',
-                'NAME',
-            ])
-            ->whereIn('ID', $ids)
-            ->setLimit(count($ids))
-            ->exec();
-
-        $items = [];
-        while ($row = $rows->fetch()) {
-            $items[$row['ID']] = $row;
-        }
-
-        return $items;
     }
 }
